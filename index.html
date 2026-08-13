@@ -30,7 +30,7 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>🔎 Pretraga mojih YouTube plejlista</h1>
+  <h1>🔎 Pretraga mojih YouTube plejlista <span style="font-size:.65em;color:#999">v3</span></h1>
   <p class="small">Pretražuje naslove videa u tvojim privatnim i javnim plejlistama. Pristup traje samo dok važi Google pristupni token.</p>
 
   <div class="card">
@@ -123,17 +123,43 @@ function readOAuthResponse() {
   return true;
 }
 
-async function yt(path, params={}) {
+async function yt(path, params={}, attempts=3) {
   const u = new URL('https://www.googleapis.com/youtube/v3/' + path);
   Object.entries(params).forEach(([k,v]) => u.searchParams.set(k,v));
-  const r = await fetch(u, {headers:{Authorization:'Bearer ' + accessToken}});
-  if (!r.ok) {
-    let detail = '';
-    try { detail = (await r.json()).error?.message || ''; } catch {}
-    if (r.status === 401) throw new Error('Pristup je istekao. Pritisni „Poveži YouTube“ ponovo.');
-    throw new Error(`${path}: ${r.status} ${detail}`);
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20000);
+
+    try {
+      const r = await fetch(u, {
+        headers:{Authorization:'Bearer ' + accessToken},
+        signal: controller.signal
+      });
+      clearTimeout(timer);
+
+      if (!r.ok) {
+        let detail = '';
+        try { detail = (await r.json()).error?.message || ''; } catch {}
+        if (r.status === 401) throw new Error('Pristup je istekao. Pritisni „Poveži YouTube“ ponovo.');
+        if (r.status === 403 || r.status === 404) {
+          throw new Error(`${path}: ${r.status} ${detail}`);
+        }
+        throw new Error(`${path}: ${r.status} ${detail}`);
+      }
+      return await r.json();
+    } catch (e) {
+      clearTimeout(timer);
+      lastError = e;
+      if (e.message?.includes('Pristup je istekao')) throw e;
+      if (attempt < attempts) {
+        await new Promise(r => setTimeout(r, 1200 * attempt));
+        continue;
+      }
+    }
   }
-  return r.json();
+  throw lastError || new Error('Mrežna greška.');
 }
 
 async function getOwnedPlaylists() {
@@ -141,7 +167,12 @@ async function getOwnedPlaylists() {
   let pageToken = '';
   do {
     const data = await yt('playlists', {part:'snippet,contentDetails,status', mine:'true', maxResults:'50', ...(pageToken ? {pageToken} : {})});
-    for (const p of data.items || []) out.push({id:p.id, title:p.snippet?.title || '(bez naziva)', privacy:p.status?.privacyStatus || ''});
+    for (const p of data.items || []) out.push({
+      id:p.id,
+      title:p.snippet?.title || '(bez naziva)',
+      privacy:p.status?.privacyStatus || '',
+      itemCount:p.contentDetails?.itemCount ?? null
+    });
     pageToken = data.nextPageToken || '';
   } while(pageToken);
   try {
@@ -152,19 +183,39 @@ async function getOwnedPlaylists() {
   return out;
 }
 
-async function getPlaylistItems(pl) {
+async function getPlaylistItems(pl, playlistIndex, totalPlaylists) {
   const out = [];
   let pageToken = '';
+  let page = 0;
+
   do {
-    const data = await yt('playlistItems', {part:'snippet,contentDetails', playlistId:pl.id, maxResults:'50', ...(pageToken ? {pageToken} : {})});
+    page++;
+    const totalHint = Number.isFinite(pl.itemCount) ? pl.itemCount : '?';
+    setStatus(`Plejlista ${playlistIndex}/${totalPlaylists}: ${pl.title}\nUčitano ${out.length}/${totalHint} videa iz ove plejliste • stranica ${page}`);
+
+    const data = await yt('playlistItems', {
+      part:'snippet,contentDetails',
+      playlistId:pl.id,
+      maxResults:'50',
+      ...(pageToken ? {pageToken} : {})
+    });
+
     for (const it of data.items || []) {
       const vid = it.contentDetails?.videoId || it.snippet?.resourceId?.videoId;
       const title = it.snippet?.title || '';
       if (!vid || !title || title === 'Deleted video' || title === 'Private video') continue;
-      out.push({videoId:vid, title, channel:it.snippet?.videoOwnerChannelTitle || '', playlistId:pl.id, playlist:pl.title});
+      out.push({
+        videoId:vid,
+        title,
+        channel:it.snippet?.videoOwnerChannelTitle || '',
+        playlistId:pl.id,
+        playlist:pl.title
+      });
     }
+
     pageToken = data.nextPageToken || '';
   } while(pageToken);
+
   return out;
 }
 
@@ -173,16 +224,32 @@ async function loadAll() {
   $('searchBtn').disabled = true;
   $('reloadBtn').disabled = true;
   allItems = [];
+
   playlists = await getOwnedPlaylists();
-  setStatus(`Pronađeno ${playlists.length} plejlista. Učitavam videe…`);
-  let done = 0, skipped = 0;
-  for (const pl of playlists) {
-    try { allItems.push(...await getPlaylistItems(pl)); }
-    catch (e) { skipped++; console.warn('Preskočena plejlista', pl.title, e); }
+  setStatus(`Pronađeno ${playlists.length} plejlista. Počinjem učitavanje…`);
+
+  let done = 0;
+  const skipped = [];
+
+  for (let i = 0; i < playlists.length; i++) {
+    const pl = playlists[i];
+    try {
+      const items = await getPlaylistItems(pl, i + 1, playlists.length);
+      allItems.push(...items);
+    } catch (e) {
+      skipped.push(`${pl.title}: ${e.message}`);
+      console.warn('Preskočena plejlista', pl.title, e);
+    }
+
     done++;
-    setStatus(`Učitavanje: ${done}/${playlists.length} plejlista • ${allItems.length} videa`);
+    setStatus(`Završeno ${done}/${playlists.length} plejlista • ukupno ${allItems.length} videa${skipped.length ? ` • preskočeno ${skipped.length}` : ''}`);
   }
-  setStatus(`Spremno: ${playlists.length} plejlista • ${allItems.length} videa${skipped ? ` • preskočeno ${skipped} lista` : ''}.`);
+
+  setStatus(
+    `Spremno: ${playlists.length} plejlista • ${allItems.length} videa` +
+    (skipped.length ? ` • preskočeno ${skipped.length} problematičnih plejlista.\n` + skipped.slice(0,5).join('\n') : '')
+  );
+
   $('query').disabled = false;
   $('searchBtn').disabled = false;
   $('reloadBtn').disabled = false;
