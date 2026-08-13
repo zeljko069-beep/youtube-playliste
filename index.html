@@ -30,8 +30,8 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>🔎 Pretraga mojih YouTube plejlista <span style="font-size:.65em;color:#999">v3</span></h1>
-  <p class="small">Pretražuje naslove videa u tvojim privatnim i javnim plejlistama. Pristup traje samo dok važi Google pristupni token.</p>
+  <h1>🔎 Pretraga mojih YouTube plejlista <span style="font-size:.65em;color:#999">v4</span></h1>
+  <p class="small">Pretražuje naslove videa u tvojim privatnim i javnim plejlistama. v4 ima zaštitu od ponavljanja stranica i duplih videa.</p>
 
   <div class="card">
     <label for="clientId"><b>Google OAuth Web Client ID</b></label>
@@ -185,13 +185,37 @@ async function getOwnedPlaylists() {
 
 async function getPlaylistItems(pl, playlistIndex, totalPlaylists) {
   const out = [];
+  const seenVideoIds = new Set();
+  const seenPageTokens = new Set();
+
   let pageToken = '';
   let page = 0;
+  let totalResults = Number.isFinite(pl.itemCount) ? pl.itemCount : null;
 
-  do {
+  while (true) {
+    // Protection against a repeated token causing an endless loop.
+    if (pageToken) {
+      if (seenPageTokens.has(pageToken)) {
+        console.warn('Ponovljen pageToken — prekidam ovu plejlistu:', pl.title, pageToken);
+        break;
+      }
+      seenPageTokens.add(pageToken);
+    }
+
     page++;
-    const totalHint = Number.isFinite(pl.itemCount) ? pl.itemCount : '?';
-    setStatus(`Plejlista ${playlistIndex}/${totalPlaylists}: ${pl.title}\nUčitano ${out.length}/${totalHint} videa iz ove plejliste • stranica ${page}`);
+
+    // Hard safety limit. A playlist should never need anywhere near this many
+    // pages at 50 items/page. This prevents runaway loops if the API behaves oddly.
+    if (page > 500) {
+      console.warn('Previše stranica — sigurnosni prekid:', pl.title);
+      break;
+    }
+
+    const totalHint = totalResults ?? '?';
+    setStatus(
+      `Plejlista ${playlistIndex}/${totalPlaylists}: ${pl.title}\n` +
+      `Učitano ${out.length}/${totalHint} videa iz ove plejliste • stranica ${page}`
+    );
 
     const data = await yt('playlistItems', {
       part:'snippet,contentDetails',
@@ -200,10 +224,18 @@ async function getPlaylistItems(pl, playlistIndex, totalPlaylists) {
       ...(pageToken ? {pageToken} : {})
     });
 
+    if (Number.isFinite(data.pageInfo?.totalResults)) {
+      totalResults = data.pageInfo.totalResults;
+    }
+
     for (const it of data.items || []) {
       const vid = it.contentDetails?.videoId || it.snippet?.resourceId?.videoId;
       const title = it.snippet?.title || '';
+
       if (!vid || !title || title === 'Deleted video' || title === 'Private video') continue;
+      if (seenVideoIds.has(vid)) continue;
+
+      seenVideoIds.add(vid);
       out.push({
         videoId:vid,
         title,
@@ -213,8 +245,19 @@ async function getPlaylistItems(pl, playlistIndex, totalPlaylists) {
       });
     }
 
-    pageToken = data.nextPageToken || '';
-  } while(pageToken);
+    const next = data.nextPageToken || '';
+
+    // If there is no next token, this playlist is finished normally.
+    if (!next) break;
+
+    // Extra protection: if Google returns the same token we just used, stop.
+    if (next === pageToken) {
+      console.warn('Google je vratio isti nextPageToken — prekidam:', pl.title);
+      break;
+    }
+
+    pageToken = next;
+  }
 
   return out;
 }
