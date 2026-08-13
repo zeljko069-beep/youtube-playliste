@@ -31,7 +31,7 @@
 <body>
 <div class="wrap">
   <h1>🔎 Pretraga mojih YouTube plejlista</h1>
-  <p class="small">Pretražuje naslove videa u tvojim privatnim i javnim plejlistama nakon Google prijave.</p>
+  <p class="small">Pretražuje naslove videa u tvojim privatnim i javnim plejlistama. Pristup traje samo dok važi Google pristupni token.</p>
 
   <div class="card">
     <label for="clientId"><b>Google OAuth Web Client ID</b></label>
@@ -49,163 +49,184 @@
     <div class="small" id="count"></div>
   </div>
 
-  <div class="card hidden" id="resultsCard">
-    <div id="results"></div>
-  </div>
+  <div class="card hidden" id="resultsCard"><div id="results"></div></div>
 </div>
 
-<script src="https://accounts.google.com/gsi/client" async defer></script>
 <script>
-const SCOPE='https://www.googleapis.com/auth/youtube.readonly';
-let tokenClient=null, accessToken=null, allItems=[], playlists=[];
-const $=id=>document.getElementById(id);
+const SCOPE = 'https://www.googleapis.com/auth/youtube.readonly';
+const REDIRECT_URI = 'https://zeljko069-beep.github.io/youtube-playliste/';
+let accessToken = null;
+let allItems = [];
+let playlists = [];
+const $ = id => document.getElementById(id);
 
-function norm(s=''){
-  return s.toLocaleLowerCase('sr').normalize('NFD')
-    .replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
+function norm(s='') {
+  return s.toLocaleLowerCase('sr').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
 }
-function setStatus(msg){ $('status').textContent=msg; }
-$('clientId').value=localStorage.getItem('yt_client_id')||'';
+function setStatus(msg){ $('status').textContent = msg; }
+$('clientId').value = localStorage.getItem('yt_client_id') || '';
 
-$('saveClient').onclick=()=>{
-  const id=$('clientId').value.trim();
-  if(!id.endsWith('.apps.googleusercontent.com')){
+$('saveClient').onclick = () => {
+  const id = $('clientId').value.trim();
+  if (!id.endsWith('.apps.googleusercontent.com')) {
     alert('Client ID treba da se završava sa .apps.googleusercontent.com');
     return;
   }
-  localStorage.setItem('yt_client_id',id);
+  localStorage.setItem('yt_client_id', id);
   setStatus('Client ID sačuvan na ovom telefonu.');
 };
 
-function initTokenClient(){
-  const clientId=$('clientId').value.trim();
-  if(!clientId) throw new Error('Prvo unesi Google OAuth Web Client ID.');
-  if(!window.google?.accounts?.oauth2) throw new Error('Google prijava se još učitava. Sačekaj par sekundi pa pokušaj ponovo.');
-  tokenClient=google.accounts.oauth2.initTokenClient({
-    client_id:clientId,
-    scope:SCOPE,
-    callback:async(resp)=>{
-      if(resp.error){ setStatus('Greška pri prijavi: '+(resp.error_description||resp.error)); return; }
-      accessToken=resp.access_token;
-      setStatus('Povezano. Učitavam plejliste…');
-      try{ await loadAll(); }catch(e){ setStatus('Greška: '+e.message); }
-    }
-  });
+function makeState() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, b => b.toString(16).padStart(2,'0')).join('');
 }
 
-$('connectBtn').onclick=()=>{
-  try{
-    initTokenClient();
-    tokenClient.requestAccessToken({prompt:'consent'});
-  }catch(e){ setStatus(e.message); }
+$('connectBtn').onclick = () => {
+  const clientId = $('clientId').value.trim();
+  if (!clientId) { setStatus('Prvo unesi i sačuvaj Google OAuth Web Client ID.'); return; }
+  const state = makeState();
+  sessionStorage.setItem('yt_oauth_state', state);
+  const u = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+  u.searchParams.set('client_id', clientId);
+  u.searchParams.set('redirect_uri', REDIRECT_URI);
+  u.searchParams.set('response_type', 'token');
+  u.searchParams.set('scope', SCOPE);
+  u.searchParams.set('include_granted_scopes', 'true');
+  u.searchParams.set('state', state);
+  u.searchParams.set('prompt', 'consent');
+  location.assign(u.toString());
 };
 
-async function yt(path,params={}){
-  const u=new URL('https://www.googleapis.com/youtube/v3/'+path);
-  Object.entries(params).forEach(([k,v])=>u.searchParams.set(k,v));
-  const r=await fetch(u,{headers:{Authorization:'Bearer '+accessToken}});
-  if(!r.ok){
-    let detail='';
-    try{ detail=(await r.json()).error?.message||''; }catch{}
+function readOAuthResponse() {
+  if (!location.hash) return false;
+  const p = new URLSearchParams(location.hash.slice(1));
+  if (p.get('error')) {
+    setStatus('Google prijava nije uspjela: ' + p.get('error'));
+    history.replaceState(null, '', REDIRECT_URI);
+    return true;
+  }
+  const token = p.get('access_token');
+  if (!token) return false;
+  const returnedState = p.get('state') || '';
+  const expectedState = sessionStorage.getItem('yt_oauth_state') || '';
+  if (!expectedState || returnedState !== expectedState) {
+    setStatus('Sigurnosna provjera prijave nije prošla. Pritisni ponovo „Poveži YouTube“.');
+    history.replaceState(null, '', REDIRECT_URI);
+    return true;
+  }
+  sessionStorage.removeItem('yt_oauth_state');
+  accessToken = token;
+  history.replaceState(null, '', REDIRECT_URI);
+  setStatus('Povezano. Učitavam plejliste…');
+  loadAll().catch(e => setStatus('Greška: ' + e.message));
+  return true;
+}
+
+async function yt(path, params={}) {
+  const u = new URL('https://www.googleapis.com/youtube/v3/' + path);
+  Object.entries(params).forEach(([k,v]) => u.searchParams.set(k,v));
+  const r = await fetch(u, {headers:{Authorization:'Bearer ' + accessToken}});
+  if (!r.ok) {
+    let detail = '';
+    try { detail = (await r.json()).error?.message || ''; } catch {}
+    if (r.status === 401) throw new Error('Pristup je istekao. Pritisni „Poveži YouTube“ ponovo.');
     throw new Error(`${path}: ${r.status} ${detail}`);
   }
   return r.json();
 }
 
-async function getOwnedPlaylists(){
-  const out=[]; let pageToken='';
-  do{
-    const data=await yt('playlists',{
-      part:'snippet,contentDetails,status', mine:'true', maxResults:'50',
-      ...(pageToken?{pageToken}:{})
-    });
-    for(const p of data.items||[]){
-      out.push({id:p.id,title:p.snippet?.title||'(bez naziva)',privacy:p.status?.privacyStatus||''});
-    }
-    pageToken=data.nextPageToken||'';
-  }while(pageToken);
-
-  try{
-    const ch=await yt('channels',{part:'contentDetails',mine:'true',maxResults:'1'});
-    const likes=ch.items?.[0]?.contentDetails?.relatedPlaylists?.likes;
-    if(likes && !out.some(p=>p.id===likes)) out.push({id:likes,title:'Lajkovani videi',privacy:'private',special:true});
-  }catch{}
+async function getOwnedPlaylists() {
+  const out = [];
+  let pageToken = '';
+  do {
+    const data = await yt('playlists', {part:'snippet,contentDetails,status', mine:'true', maxResults:'50', ...(pageToken ? {pageToken} : {})});
+    for (const p of data.items || []) out.push({id:p.id, title:p.snippet?.title || '(bez naziva)', privacy:p.status?.privacyStatus || ''});
+    pageToken = data.nextPageToken || '';
+  } while(pageToken);
+  try {
+    const ch = await yt('channels', {part:'contentDetails', mine:'true', maxResults:'1'});
+    const likes = ch.items?.[0]?.contentDetails?.relatedPlaylists?.likes;
+    if (likes && !out.some(p => p.id === likes)) out.push({id:likes, title:'Lajkovani videi', privacy:'private'});
+  } catch {}
   return out;
 }
 
-async function getPlaylistItems(pl){
-  const out=[]; let pageToken='';
-  do{
-    const data=await yt('playlistItems',{
-      part:'snippet,contentDetails', playlistId:pl.id, maxResults:'50',
-      ...(pageToken?{pageToken}:{})
-    });
-    for(const it of data.items||[]){
-      const vid=it.contentDetails?.videoId||it.snippet?.resourceId?.videoId;
-      const title=it.snippet?.title||'';
-      if(!vid||!title||title==='Deleted video'||title==='Private video') continue;
-      out.push({
-        videoId:vid,title,
-        channel:it.snippet?.videoOwnerChannelTitle||'',
-        playlistId:pl.id,playlist:pl.title
-      });
+async function getPlaylistItems(pl) {
+  const out = [];
+  let pageToken = '';
+  do {
+    const data = await yt('playlistItems', {part:'snippet,contentDetails', playlistId:pl.id, maxResults:'50', ...(pageToken ? {pageToken} : {})});
+    for (const it of data.items || []) {
+      const vid = it.contentDetails?.videoId || it.snippet?.resourceId?.videoId;
+      const title = it.snippet?.title || '';
+      if (!vid || !title || title === 'Deleted video' || title === 'Private video') continue;
+      out.push({videoId:vid, title, channel:it.snippet?.videoOwnerChannelTitle || '', playlistId:pl.id, playlist:pl.title});
     }
-    pageToken=data.nextPageToken||'';
-  }while(pageToken);
+    pageToken = data.nextPageToken || '';
+  } while(pageToken);
   return out;
 }
 
-async function loadAll(){
-  $('query').disabled=true; $('searchBtn').disabled=true; $('reloadBtn').disabled=true;
-  allItems=[]; playlists=await getOwnedPlaylists();
+async function loadAll() {
+  $('query').disabled = true;
+  $('searchBtn').disabled = true;
+  $('reloadBtn').disabled = true;
+  allItems = [];
+  playlists = await getOwnedPlaylists();
   setStatus(`Pronađeno ${playlists.length} plejlista. Učitavam videe…`);
-  let done=0, skipped=0;
-  for(const pl of playlists){
-    try{ allItems.push(...await getPlaylistItems(pl)); }
-    catch(e){ skipped++; console.warn('Preskočena plejlista',pl.title,e); }
+  let done = 0, skipped = 0;
+  for (const pl of playlists) {
+    try { allItems.push(...await getPlaylistItems(pl)); }
+    catch (e) { skipped++; console.warn('Preskočena plejlista', pl.title, e); }
     done++;
     setStatus(`Učitavanje: ${done}/${playlists.length} plejlista • ${allItems.length} videa`);
   }
-  setStatus(`Spremno: ${playlists.length} plejlista • ${allItems.length} videa${skipped?` • preskočeno ${skipped} nepodržanih lista`:''}.`);
-  $('query').disabled=false; $('searchBtn').disabled=false; $('reloadBtn').disabled=false;
+  setStatus(`Spremno: ${playlists.length} plejlista • ${allItems.length} videa${skipped ? ` • preskočeno ${skipped} lista` : ''}.`);
+  $('query').disabled = false;
+  $('searchBtn').disabled = false;
+  $('reloadBtn').disabled = false;
 }
 
-$('reloadBtn').onclick=()=>loadAll().catch(e=>setStatus('Greška: '+e.message));
+$('reloadBtn').onclick = () => {
+  if (!accessToken) { setStatus('Prvo poveži YouTube.'); return; }
+  loadAll().catch(e => setStatus('Greška: ' + e.message));
+};
 
-function escapeHtml(s=''){
-  return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function escapeHtml(s='') {
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-function renderSearch(){
-  const q=norm($('query').value);
-  $('results').innerHTML=''; $('resultsCard').classList.remove('hidden');
-  if(!q){ $('count').textContent='Upiši frazu za pretragu.'; return; }
-  const words=q.split(' ').filter(Boolean);
-  const matches=allItems.filter(x=>{
-    const hay=norm(`${x.title} ${x.channel} ${x.playlist}`);
-    return words.every(w=>hay.includes(w));
+function renderSearch() {
+  const q = norm($('query').value);
+  $('results').innerHTML = '';
+  $('resultsCard').classList.remove('hidden');
+  if (!q) { $('count').textContent = 'Upiši frazu za pretragu.'; return; }
+  const words = q.split(' ').filter(Boolean);
+  const matches = allItems.filter(x => {
+    const hay = norm(`${x.title} ${x.channel} ${x.playlist}`);
+    return words.every(w => hay.includes(w));
   });
-  $('count').textContent=`Rezultata: ${matches.length}`;
-  if(!matches.length){ $('results').innerHTML='<div class="small">Nema rezultata.</div>'; return; }
-
-  const grouped=new Map();
-  for(const m of matches){
-    const g=grouped.get(m.videoId)||{videoId:m.videoId,title:m.title,channel:m.channel,playlists:[]};
-    if(!g.playlists.includes(m.playlist)) g.playlists.push(m.playlist);
-    grouped.set(m.videoId,g);
+  $('count').textContent = `Rezultata: ${matches.length}`;
+  if (!matches.length) { $('results').innerHTML = '<div class="small">Nema rezultata.</div>'; return; }
+  const grouped = new Map();
+  for (const m of matches) {
+    const g = grouped.get(m.videoId) || {videoId:m.videoId, title:m.title, channel:m.channel, playlists:[]};
+    if (!g.playlists.includes(m.playlist)) g.playlists.push(m.playlist);
+    grouped.set(m.videoId, g);
   }
-
-  for(const g of grouped.values()){
-    const div=document.createElement('div');
-    div.className='result';
-    const pls=g.playlists.map(p=>`<span class="pill">${escapeHtml(p)}</span>`).join('');
-    div.innerHTML=`<div class="title"><a target="_blank" rel="noopener" href="https://www.youtube.com/watch?v=${encodeURIComponent(g.videoId)}">${escapeHtml(g.title)}</a></div>
-      <div class="meta">${escapeHtml(g.channel||'')}</div><div>${pls}</div>`;
+  for (const g of grouped.values()) {
+    const div = document.createElement('div');
+    div.className = 'result';
+    const pls = g.playlists.map(p => `<span class="pill">${escapeHtml(p)}</span>`).join('');
+    div.innerHTML = `<div class="title"><a target="_blank" rel="noopener" href="https://www.youtube.com/watch?v=${encodeURIComponent(g.videoId)}">${escapeHtml(g.title)}</a></div><div class="meta">${escapeHtml(g.channel || '')}</div><div>${pls}</div>`;
     $('results').appendChild(div);
   }
 }
-$('searchBtn').onclick=renderSearch;
-$('query').addEventListener('keydown',e=>{ if(e.key==='Enter') renderSearch(); });
+
+$('searchBtn').onclick = renderSearch;
+$('query').addEventListener('keydown', e => { if (e.key === 'Enter') renderSearch(); });
+readOAuthResponse();
 </script>
 </body>
 </html>
