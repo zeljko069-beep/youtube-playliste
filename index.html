@@ -30,8 +30,8 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>🔎 Pretraga mojih YouTube plejlista <span style="font-size:.65em;color:#999">v4</span></h1>
-  <p class="small">Pretražuje naslove videa u tvojim privatnim i javnim plejlistama. v4 ima zaštitu od ponavljanja stranica i duplih videa.</p>
+  <h1>🔎 Pretraga mojih YouTube plejlista <span style="font-size:.65em;color:#999">v5</span></h1>
+  <p class="small">Pretražuje naslove videa u tvojim privatnim i javnim plejlistama. v5 čuva posljednju uspješno učitanu bazu na ovom telefonu.</p>
 
   <div class="card">
     <label for="clientId"><b>Google OAuth Web Client ID</b></label>
@@ -46,7 +46,7 @@
     <input id="query" placeholder="npr. špageti carbonara" disabled>
     <button class="primary" id="searchBtn" disabled>Pretraži</button>
     <button class="secondary" id="reloadBtn" disabled>Ponovo učitaj plejliste</button>
-    <div class="small" id="count"></div>
+    <div class="small" id="count"></div><div class="small" id="savedInfo" style="margin-top:8px"></div>
   </div>
 
   <div class="card hidden" id="resultsCard"><div id="results"></div></div>
@@ -64,6 +64,33 @@ function norm(s='') {
   return s.toLocaleLowerCase('sr').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
 }
 function setStatus(msg){ $('status').textContent = msg; }
+
+const DB_NAME='yt_playliste_v5', STORE='cache', CACHE_KEY='library';
+function openDb(){return new Promise((ok,no)=>{const r=indexedDB.open(DB_NAME,1);r.onupgradeneeded=()=>{if(!r.result.objectStoreNames.contains(STORE))r.result.createObjectStore(STORE)};r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)})}
+async function saveLibrary(){
+ const payload={savedAt:new Date().toISOString(),items:allItems,playlists};
+ const db=await openDb();
+ await new Promise((ok,no)=>{const t=db.transaction(STORE,'readwrite');t.objectStore(STORE).put(payload,CACHE_KEY);t.oncomplete=ok;t.onerror=()=>no(t.error)});
+ db.close(); return payload;
+}
+async function loadLibrary(){
+ const db=await openDb();
+ const x=await new Promise((ok,no)=>{const t=db.transaction(STORE,'readonly'),r=t.objectStore(STORE).get(CACHE_KEY);r.onsuccess=()=>ok(r.result||null);r.onerror=()=>no(r.error)});
+ db.close(); return x;
+}
+function fmt(d){try{return new Intl.DateTimeFormat('sr-Latn-ME',{dateStyle:'medium',timeStyle:'short'}).format(new Date(d))}catch{return new Date(d).toLocaleString()}}
+async function restoreLibrary(){
+ try{
+  const x=await loadLibrary();
+  if(!x?.items?.length)return false;
+  allItems=x.items; playlists=Array.isArray(x.playlists)?x.playlists:[];
+  $('query').disabled=false; $('searchBtn').disabled=false; $('reloadBtn').disabled=false;
+  $('savedInfo').textContent=`Sačuvano: ${allItems.length} videa iz ${playlists.length} plejlista • osvježeno: ${fmt(x.savedAt)}`;
+  setStatus('Sačuvana baza je spremna. Možeš odmah pretraživati.');
+  return true;
+ }catch(e){console.warn(e);return false}
+}
+
 $('clientId').value = localStorage.getItem('yt_client_id') || '';
 
 $('saveClient').onclick = () => {
@@ -288,6 +315,13 @@ async function loadAll() {
     setStatus(`Završeno ${done}/${playlists.length} plejlista • ukupno ${allItems.length} videa${skipped.length ? ` • preskočeno ${skipped.length}` : ''}`);
   }
 
+  try {
+    const saved=await saveLibrary();
+    $('savedInfo').textContent=`Sačuvano: ${allItems.length} videa iz ${playlists.length} plejlista • osvježeno: ${fmt(saved.savedAt)}`;
+  } catch(e) {
+    $('savedInfo').textContent='Učitano, ali lokalno čuvanje nije uspjelo.';
+  }
+
   setStatus(
     `Spremno: ${playlists.length} plejlista • ${allItems.length} videa` +
     (skipped.length ? ` • preskočeno ${skipped.length} problematičnih plejlista.\n` + skipped.slice(0,5).join('\n') : '')
@@ -299,8 +333,11 @@ async function loadAll() {
 }
 
 $('reloadBtn').onclick = () => {
-  if (!accessToken) { setStatus('Prvo poveži YouTube.'); return; }
-  loadAll().catch(e => setStatus('Greška: ' + e.message));
+  if (!accessToken) {
+    setStatus('Za osvježavanje prvo pritisni „Poveži YouTube“. Sačuvana baza ostaje dostupna.');
+    return;
+  }
+  loadAll().catch(e => setStatus('Greška pri osvježavanju: ' + e.message + '\nSačuvana baza nije obrisana.'));
 };
 
 function escapeHtml(s='') {
@@ -336,7 +373,13 @@ function renderSearch() {
 
 $('searchBtn').onclick = renderSearch;
 $('query').addEventListener('keydown', e => { if (e.key === 'Enter') renderSearch(); });
-readOAuthResponse();
+(async()=>{
+  const oauthHandled=readOAuthResponse();
+  if(!oauthHandled){
+    const restored=await restoreLibrary();
+    if(!restored)setStatus('Nema sačuvane baze. Poveži YouTube za prvo učitavanje.');
+  }
+})();
 </script>
 </body>
 </html>
